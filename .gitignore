@@ -1,0 +1,27 @@
+# Binaries & Executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Environment Variables & Secrets
+.env
+.env.local
+*.env
+!.env.example
+
+# Logs & Temp files
+*.log
+*.tmp
+
+# Editor & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+*.md
+!README.md

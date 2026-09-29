@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loading 100 million rows into Postgres on a laptop — Engineering Notes</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <!-- Tailwind CSS -->
+  <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+
+  <style>
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: #0c0d10;
+      color: #d1d5db;
+    }
+    code, pre, .font-mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    pre {
+      background-color: #121318;
+      border: 1px solid #1f2128;
+    }
+    .prose p {
+      font-size: 1.0625rem; /* 17px */
+      line-height: 1.8;
+      color: #d1d5db;
+      margin-bottom: 1.5rem;
+    }
+    .prose h2 {
+      color: #ffffff;
+      font-size: 1.625rem; /* 26px */
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-top: 3.5rem;
+      margin-bottom: 1rem;
+    }
+    .prose h3 {
+      color: #f3f4f6;
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      margin-top: 2rem;
+      margin-bottom: 0.75rem;
+    }
+    .prose blockquote {
+      border-left: 2px solid #374151;
+      padding-left: 1.25rem;
+      margin-top: 1.75rem;
+      margin-bottom: 1.75rem;
+      color: #9ca3af;
+      font-style: italic;
+    }
+    .prose a {
+      color: #e5e7eb;
+      text-decoration: underline;
+      text-underline-offset: 4px;
+      text-decoration-color: #4b5563;
+      transition: text-decoration-color 0.15s, color 0.15s;
+    }
+    .prose a:hover {
+      color: #ffffff;
+      text-decoration-color: #ffffff;
+    }
+    .prose strong {
+      color: #ffffff;
+      font-weight: 600;
+    }
+    .prose code:not(pre code) {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.875rem;
+      background-color: #17181f;
+      color: #e5e7eb;
+      padding: 0.2rem 0.4rem;
+      border-radius: 3px;
+      border: 1px solid #262833;
+    }
+  </style>
+</head>
+<body class="min-h-screen antialiased selection:bg-neutral-800 selection:text-white">
+
+  <!-- Top Minimal Nav Header -->
+  <header class="border-b border-[#1f2128] bg-[#0c0d10]/95 sticky top-0 z-50 backdrop-blur-sm">
+    <div class="max-w-3xl mx-auto px-6 h-14 flex items-center justify-between text-xs font-mono">
+      <div class="flex items-center gap-2">
+        <a href="/" class="text-neutral-400 hover:text-white flex items-center gap-1.5 transition-colors">
+          <svg class="size-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+          <span>Workbench</span>
+        </a>
+        <span class="text-neutral-600">/</span>
+        <span class="text-neutral-400">Engineering</span>
+      </div>
+
+      <div class="flex items-center gap-4">
+        <a href="https://github.com/Yonathan-T/rowageddon" target="_blank" rel="noopener noreferrer" class="text-neutral-400 hover:text-white flex items-center gap-1.5 transition-colors">
+          <svg class="size-4" fill="currentColor" viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>
+          <span>GitHub</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Article Container -->
+  <main class="max-w-3xl mx-auto px-6 py-14 sm:py-20">
+    <article class="prose">
+
+      <!-- Title & Subtitle -->
+      <div class="mb-10 pb-8 border-b border-[#1f2128]">
+        <h1 class="text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight text-white leading-[1.15] mb-4">
+          Loading 100 million rows into Postgres on a laptop
+        </h1>
+
+        <!-- Meta Line -->
+        <div class="flex flex-wrap items-center gap-y-2 gap-x-3 text-xs text-neutral-400 font-mono pt-2">
+          <span>Part of <a href="https://t.me/chapidevtalks_group/32454" target="_blank" class="text-neutral-300 hover:text-white font-medium">Chapi's 100M Row Challenge</a></span>
+          <span class="text-neutral-600">•</span>
+          <span>Thanks to <a href="https://t.me/Robi_makes_stuff" target="_blank" class="text-neutral-300 hover:text-white font-medium">@Robi_makes_stuff</a></span>
+          <span class="text-neutral-600">•</span>
+          <span>PostgreSQL 18.1 + Go 1.26</span>
+        </div>
+      </div>
+
+      <!-- Lead paragraph -->
+      <p>
+        When you build CRUD apps with 10,000 or even 100,000 rows, databases are polite. PostgreSQL will forgive missing indexes, forgive unoptimized queries, and quietly cache everything in RAM.
+      </p>
+      <p>
+        Once you cross 20, 50, and 100 million rows, <strong>the database stops being polite and starts teaching you physics: memory limits, disk I/O bottlenecks, cache thrashing, WAL pressure, and table bloat.</strong>
+      </p>
+      <p>
+        This is what happened when I ingested, broke, tuned, and benchmarked 100,000,000 physical rows on a standard consumer laptop.
+      </p>
+
+      <!-- Section: The Setup -->
+      <h2>The setup: can my laptop survive 100 million rows?</h2>
+      <p>
+        Before attempting this, I had an honest question: will consumer hardware freeze, thrash the NVMe drive to death, or run out of disk space?
+      </p>
+
+      <div class="my-6 rounded bg-[#121318] border border-[#1f2128] p-4 text-xs font-mono text-neutral-300 space-y-1">
+        <div><span class="text-neutral-500">CPU:</span> 12th Gen Intel Core i5-1240P (12 cores, 16 threads, up to 4.4 GHz)</div>
+        <div><span class="text-neutral-500">RAM:</span> 16 GB DDR4/DDR5</div>
+        <div><span class="text-neutral-500">Disk:</span> NVMe SSD (~149 GB free space)</div>
+        <div><span class="text-neutral-500">Database:</span> Native PostgreSQL 18.1 (Windows Service)</div>
+        <div><span class="text-neutral-500">Loader:</span> Native Go 1.26 with pgx/v5 binary connection pool</div>
+      </div>
+
+      <p>
+        For the database, I went with a Hacker News-like schema with these fields:
+      </p>
+
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code>CREATE TABLE hn_items (
+    id BIGSERIAL PRIMARY KEY,
+    parent_id BIGINT,
+    created_at TIMESTAMPTZ NOT NULL,
+    score INT NOT NULL DEFAULT 0,
+    deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    deleted_at TIMESTAMPTZ DEFAULT NULL,
+    item_type VARCHAR(16) NOT NULL,
+    author VARCHAR(32) NOT NULL
+);</code></pre>
+
+      <p>
+        Each row on disk averages around <strong>76.8 bytes</strong> with tuple headers. Across 100 million rows, the raw table heap sits at roughly <strong>7.68 Gigabytes</strong>.
+      </p>
+
+      <!-- Section: Why No Text -->
+      <h2>Why I didn't include text in the schema</h2>
+      <p>
+        Leaving out a text or body column might seem counterintuitive for a Hacker News dataset, but it comes down to three practical reasons: storage math, PostgreSQL TOAST behavior, and how production systems actually work.
+      </p>
+
+      <p>
+        <strong>1. Storage math on 100 million rows.</strong> Hacker News comments average between 250 and 500 bytes of raw text. If you multiply that across 100 million rows:
+      </p>
+      <blockquote>
+        100,000,000 rows × 350 bytes ≈ 35 Gigabytes of raw text alone.
+      </blockquote>
+      <p>
+        Once you account for Postgres row headers, alignment padding, and B-Tree indexes, a single table would balloon past <strong>75 GB</strong>. On a 512GB laptop SSD shared with the operating system and dev tools, that eats up available space fast without adding anything to index benchmarking.
+      </p>
+      <p>
+        <strong>2. Avoiding the TOAST penalty.</strong> In Postgres, wide attributes are pushed out-of-line into a separate TOAST table (<code>pg_toast</code>). Even when text is slightly smaller, variable-length text bloats tuples and ruins page packing. With a lean 76.8-byte schema, Postgres packs <strong>80 to 100 rows into every single 8KB disk page</strong>. That keeps memory buffer cache hits near 100%. If you drop 400-byte text into every row, page density collapses by 80%, forcing the engine to fetch five times more pages off the SSD for every query.
+      </p>
+      <p>
+        <strong>3. Production reality.</strong> In high-throughput architectures like Hacker News or Reddit, transactional databases don't store large markdown bodies in their primary relational tables. They store and index the relational routing keys (author, parent comment ID for threading, timestamps, scores, deletion flags), while heavy payloads are stored in object storage (S3/R2) or dedicated document caches. This challenge tests relational indexing and cursor pagination, not full-text search.
+      </p>
+
+      <!-- Section: The 20M RAM incident -->
+      <h2>The 1 million warmup and the 20 million RAM incident</h2>
+      <p>
+        To insert data quickly, I wrote a Go loader using Jack Christensen’s <a href="https://github.com/jackc/pgx" target="_blank"><code>pgx</code></a> library. In Go, the standard <code>database/sql</code> driver uses parameterized <code>INSERT INTO ... VALUES (...)</code> queries, which forces PostgreSQL to parse the SQL string, check types, and plan every single batch over the wire.
+      </p>
+      <p>
+        Instead, <code>pgx</code> implements PostgreSQL’s native raw binary <code>COPY</code> protocol through <code>pgx.CopyFrom</code>. This streams binary tuple streams directly into Postgres table heap pages without SQL parsing overhead. By streaming in chunks of 5,000 rows across a pooled connection, I started with a 1,000,000 row sanity run:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code><span class="text-neutral-500">// 1M rows inserted in 4.2 seconds (~238,000 rows/sec)
+// Table size: 76 MB (98 MB with primary key index)
+// WAL files: 2 files (32 MB) -> 8 files (128 MB)</span></code></pre>
+      <p>
+        Everything felt smooth. So I scaled straight to 20,000,000 rows.
+      </p>
+      <p>
+        Once the 20 million rows were in, I opened my SQL editor and casually ran:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code>SELECT * FROM public.hn_items ORDER BY id DESC;</code></pre>
+      <p>
+        My RAM usage spiked to 99%. The editor froze, Windows started thrashing page files to swap, and I had to kill the process from Task Manager.
+      </p>
+      <p>
+        The primary key B-Tree index worked as designed—Postgres scanned backward from the largest <code>id</code>. But asking a database to stream 20 million rows across a socket into client memory with no <code>LIMIT</code> will freeze any machine.
+      </p>
+      <p>
+        At this point, I realized I did not have anything to visualize what I was doing other than raw SQL commands and terminal outputs. The challenge also specifically asked to build a tiny analytics dashboard. I didn't want to waste my time building a frontend from scratch, so I used an AI assistant to scaffold it. With the right skills file, I got an interface that I genuinely don't hate looking at: live keyset cursor pagination across the heap, index hit badges, and real-time latency charts to profile queries on the fly.
+      </p>
+
+      <!-- Section: The Index Trap -->
+      <h2>The trap: why adding indexes early murders your loader</h2>
+      <p>
+        At 20M rows, the temptation was to create all secondary indexes immediately (author lookup, parent-child comments, top stories).
+      </p>
+      <p>
+        Doing that would have been a massive mistake:
+      </p>
+      <blockquote>
+        If you create secondary indexes at 20 million rows, loading the next 80 million rows forces PostgreSQL to update every single B-Tree on every single insert. Your loader slows to a crawl.
+      </blockquote>
+      <p>
+        So I kept the table completely unindexed except for the primary key, established an unindexed query baseline, and streamed directly to 50M and then 100M rows first.
+      </p>
+      <p>
+        On 20M rows, an unindexed scan took <strong>2.4 seconds</strong>. On 50M rows, it took <strong>5 to 7 seconds</strong> because Postgres had to scan through 4 Gigabytes of raw heap off the SSD.
+      </p>
+
+      <!-- Section: Streaming 192k rows/sec -->
+      <h2>Streaming 192,000 rows a second</h2>
+      <p>
+        To load the final 50,000,000 rows (from 50M to 100M):
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code><span class="text-neutral-500">// Stream 50M rows using raw binary COPY protocol</span>
+rowsAffected, err := pool.CopyFrom(
+    ctx,
+    pgx.Identifier{"hn_items"},
+    []string{"parent_id", "created_at", "score", "deleted", "item_type", "author"},
+    &BatchRowSource{batchSize: 5000, totalRows: 50_000_000},
+)</code></pre>
+      <p>
+        The results:
+      </p>
+      <div class="my-6 rounded bg-[#121318] border border-[#1f2128] p-4 text-xs font-mono text-neutral-300 space-y-1">
+        <div><span class="text-neutral-500">Rows Streamed:</span> 50,000,000</div>
+        <div><span class="text-neutral-500">Elapsed Time:</span> 4 minutes 20 seconds</div>
+        <div><span class="text-neutral-500">Sustained Speed:</span> 192,243 rows / second</div>
+        <div><span class="text-neutral-500">Total Rows Live:</span> 100,055,192</div>
+      </div>
+      <p>
+        Once all 100M rows were in the heap, I built the secondary indexes:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code><span class="text-neutral-500">-- Primary Key: 2,142 MB
+-- Author Index: 3,859 MB (built in 4m 24s)
+-- Comments Parent Index: 2,555 MB (built in 2m 51s)
+-- Top Stories Index: 450 MB (built in 24s)
+-- Total database footprint: 16.7 GB (7.68 GB heap + 9.0 GB indexes)</span></code></pre>
+
+      <!-- Section: The 44 GB WAL Mystery -->
+      <h2>The 44 GB WAL mystery</h2>
+      <p>
+        During the 50M row streaming run, my telemetry showed <strong>44 Gigabytes of WAL records</strong> generated by PostgreSQL.
+      </p>
+      <p>
+        On a laptop with 140 GB of free space, generating 44 GB of log files would normally cause panic. But when I checked the WAL directory:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code>SELECT count(*) AS files, pg_size_pretty(sum(size)) AS total_size
+FROM pg_ls_waldir();
+<span class="text-neutral-500">-- Exactly 64 files | 1,024 MB (1.0 GB)</span></code></pre>
+      <p>
+        PostgreSQL 18 recycled the WAL segments. As checkpoints completed, Postgres renamed old 16 MB log segments instead of allocating new files on disk. The WAL directory never exceeded its 1 GB ceiling.
+      </p>
+
+      <!-- Section: The Bad Index Trap -->
+      <h2>The bad index that made queries 5× slower</h2>
+      <p>
+        This was the most surprising lesson of the entire project.
+      </p>
+      <p>
+        I wanted a query to fetch the top 20 stories sorted by score:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code>SELECT id, author, score, created_at
+FROM hn_items
+WHERE item_type = 'story'
+ORDER BY score DESC, created_at DESC
+LIMIT 20;</code></pre>
+      <p>
+        Initially, I created this index:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code>CREATE INDEX idx_stories_bad ON hn_items (created_at DESC, score DESC)
+WHERE item_type = 'story';</code></pre>
+      <p>
+        The unindexed sequential scan took <strong>2.1 seconds</strong>. With this index, the query time jumped to <strong>11.2 seconds</strong>—more than five times slower!
+      </p>
+      <p>
+        <strong>Why?</strong> The index was sorted by <code>created_at</code> first. To find stories with the highest <code>score</code>, PostgreSQL had to walk through millions of index pages in timestamp order, filtering out low-scoring stories one by one until it finally found 20 items.
+      </p>
+      <p>
+        I fixed the column order to match the <code>ORDER BY</code> clause:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code>CREATE INDEX idx_stories_top_scoring ON hn_items (score DESC, created_at DESC)
+WHERE item_type = 'story';</code></pre>
+      <p>
+        Query time dropped from <strong>11,200 ms to 0.06 ms</strong>. That is an <strong>80,800× speedup</strong> over the unindexed baseline.
+      </p>
+
+      <!-- Section: Keyset Pagination -->
+      <h2>Why row 99,999,901 takes 5 milliseconds (OFFSET vs Keyset)</h2>
+      <p>
+        Traditional pagination uses <code>OFFSET</code>:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code><span class="text-neutral-500">-- The Slow Way: OFFSET</span>
+SELECT * FROM hn_items ORDER BY id ASC LIMIT 20 OFFSET 99999900;
+<span class="text-neutral-500">-- Latency: 6,000+ ms (Postgres must read 99.99 million rows and throw them away)</span>
+
+<span class="text-neutral-500">-- The Fast Way: Keyset Cursor</span>
+SELECT * FROM hn_items WHERE id > 99999900 ORDER BY id ASC LIMIT 20;
+<span class="text-neutral-500">-- Latency: 5.1 ms</span></code></pre>
+      <p>
+        With keyset pagination, PostgreSQL traverses the B-Tree directly to the target leaf node in $O(\log N)$ time, reads 20 rows, and stops immediately.
+      </p>
+
+      <!-- Section: k6 Benchmark -->
+      <h2>Pushing it with k6: 2,692 queries per second</h2>
+      <p>
+        To test the Go server and PostgreSQL under concurrent load, I ran a Grafana k6 stress test with 100 concurrent virtual users:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code>k6 run loadtest.js
+<span class="text-neutral-500">// 100 VUs looping for 25s across random keyset cursor queries</span></code></pre>
+
+      <div class="my-6 rounded bg-[#121318] border border-[#1f2128] overflow-hidden text-xs font-mono">
+        <div class="grid grid-cols-2 sm:grid-cols-4 p-3 border-b border-[#1f2128] text-neutral-400">
+          <div>METRIC</div>
+          <div>RESULT</div>
+          <div>TARGET</div>
+          <div>STATUS</div>
+        </div>
+        <div class="divide-y divide-[#1f2128] text-neutral-300">
+          <div class="grid grid-cols-2 sm:grid-cols-4 p-3">
+            <div>Throughput</div>
+            <div class="text-white font-semibold">2,692.6 req/s</div>
+            <div>&gt; 500 req/s</div>
+            <div class="text-emerald-400">PASSED</div>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 p-3">
+            <div>Median Latency</div>
+            <div class="text-white font-semibold">1.03 ms</div>
+            <div>&lt; 10 ms</div>
+            <div class="text-emerald-400">PASSED</div>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 p-3">
+            <div>p95 Latency</div>
+            <div class="text-white font-semibold">7.02 ms</div>
+            <div>&lt; 50 ms</div>
+            <div class="text-emerald-400">PASSED</div>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-4 p-3">
+            <div>Error Rate</div>
+            <div class="text-white font-semibold">0.00% (0 / 67,341)</div>
+            <div>0.00%</div>
+            <div class="text-emerald-400">PASSED</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section: The Deletion Trap -->
+      <h2>The deletion trap: what actually happens when you delete data?</h2>
+      <p>
+        In the challenge prompt, Chapi threw in a line that caught my eye: <em>"try deletes and backups without nuking performance."</em>
+      </p>
+      <p>
+        When you're starting out, you assume <code>DELETE</code> is just the opposite of <code>INSERT</code>: you tell the database to delete some rows, and your SSD space comes back.
+      </p>
+      <p>
+        At 100 million rows, you realize that naive deletes are one of the fastest ways to murder a production database.
+      </p>
+
+      <h3>What I actually used: the boolean vs deleted_at lesson</h3>
+      <p>
+        In my initial schema, I put in:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code>deleted BOOLEAN NOT NULL DEFAULT FALSE</code></pre>
+      <p>
+        While simple, a bare boolean flag falls short in production:
+      </p>
+      <p>
+        <strong>1. No deletion timestamp.</strong> Without a timestamp, you cannot enforce automated data retention policies (like permanently purging records older than 90 days).
+      </p>
+      <p>
+        <strong>2. No grace period.</strong> If an account or thread is deleted accidentally, you cannot offer a 30-day recovery window.
+      </p>
+      <p>
+        While an 8-byte timestamp seems heavier than a 1-byte boolean on paper, <code>deleted_at IS NULL</code> consumes <strong>0 bytes of data payload</strong> for active rows (which represent 99% of your data) because PostgreSQL tracks NULLs in a 1-bit null bitmap inside the tuple header.
+      </p>
+      <p>
+        So adding <code>deleted_at TIMESTAMPTZ DEFAULT NULL</code> gives full audit history without bloating the table heap. In fact, when I ran <code>ALTER TABLE hn_items ADD COLUMN deleted_at TIMESTAMPTZ;</code> on my live 100M row database, it finished in <strong>11 milliseconds flat</strong> because PostgreSQL 18 handles NULL defaults as an instant catalog metadata update without touching table pages.
+      </p>
+
+      <h3>Why you shouldn't hard-delete comments (and what happens to the tree)</h3>
+      <p>
+        If someone deletes a comment on Hacker News or Reddit, what happens if the database runs a hard <code>DELETE FROM hn_items WHERE id = 123;</code>?
+      </p>
+      <p>
+        Disaster. If that comment had 50 nested replies under it:
+      </p>
+      <p>
+        - Foreign key constraints throw an error and refuse to delete it.
+      </p>
+      <p>
+        - Or if cascade delete is enabled, it nukes all 50 innocent replies below it, destroying everyone else's discussion!
+      </p>
+      <p>
+        - Or all 50 children are left pointing to a <code>parent_id</code> that no longer exists, breaking the frontend tree.
+      </p>
+      <p>
+        So production platforms keep the row as a tombstone: they set <code>deleted = TRUE</code> (or <code>deleted_at = NOW()</code>) and wipe the author and text to <code>[deleted]</code>. The comment tree stays intact, but personal data is gone.
+      </p>
+
+      <h3>The storage crisis: why deleting 80M rows leaves disk size unchanged</h3>
+      <p>
+        Here's the real trap. Suppose 80 million rows are deleted, and you're paying AWS or Supabase for storage every month. You check your disk usage...
+      </p>
+      <blockquote>
+        The database table is STILL 16.7 Gigabytes. You are still paying for 16.7 GB!
+      </blockquote>
+      <p>
+        Why? Because of PostgreSQL's Multi-Version Concurrency Control (MVCC). When you delete a row, Postgres doesn't erase it from disk. It just marks the row header with an <code>xmax</code> transaction ID so other queries know it's dead. The 8KB disk pages on your SSD stay allocated.
+      </p>
+      <p>
+        Worse: running a single giant <code>DELETE FROM hn_items WHERE deleted = TRUE;</code> on millions of rows writes <strong>20+ Gigabytes of WAL records</strong>, locks table pages, causes replica lag, and freezes client queries.
+      </p>
+
+      <h3>How production systems actually handle this</h3>
+      <p>
+        <strong>1. The Batched Janitor Pattern.</strong> Big companies use background reaper daemons. Instead of one massive delete, they delete in small chunks of 5,000 rows with a 50ms sleep in between:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code><span class="text-neutral-500">-- Delete in 5,000-row chunks so queries never stutter</span>
+WITH to_delete AS (
+    SELECT id FROM hn_items
+    WHERE deleted_at &lt; NOW() - INTERVAL '90 days'
+    LIMIT 5000
+)
+DELETE FROM hn_items WHERE id IN (SELECT id FROM to_delete);</code></pre>
+      <p>
+        Each chunk finishes in ~10 milliseconds, holds locks for microseconds, and lets autovacuum sweep dead tuples in the background without CPU spikes.
+      </p>
+      <p>
+        <strong>2. Partial Indexes.</strong> If 80M rows are dead, why keep them in your B-Trees? By indexing only active items:
+      </p>
+      <pre class="my-6 p-4 rounded overflow-x-auto text-[13px] leading-relaxed text-neutral-200"><code>CREATE INDEX idx_active_stories ON hn_items (score DESC, created_at DESC)
+WHERE deleted = FALSE;</code></pre>
+      <p>
+        The index size drops from 450 MB to ~90 MB. 80 million dead rows never touch your RAM cache.
+      </p>
+      <p>
+        <strong>3. Reclaiming the SSD space.</strong> If you actually want those 16.7 GB back:
+      </p>
+      <p>
+        - Offline: <code>VACUUM FULL hn_items;</code> rewrites the table into a fresh ~3.3 GB file, but locks out all queries while running.
+      </p>
+      <p>
+        - Online (what big tech uses): Tools like <code>pg_repack</code> rebuild the table and swap the files with zero downtime.
+      </p>
+      <p>
+        - Instant: For time-series data, partitioning by month lets you run <code>DROP TABLE partition_2025;</code> and free 100% of the disk space in 50 milliseconds with zero WAL bloat.
+      </p>
+
+      <!-- Section: Takeaways -->
+      <h2>What I took away from all of this</h2>
+      <p>
+        Running 100 million rows on a consumer laptop taught me more about database internals than years of small CRUD projects:
+      </p>
+      <p>
+        <strong>1. Hardware is rarely the bottleneck.</strong> A consumer laptop can handle 2,600+ queries per second on 100 million records if the access patterns match your B-Tree layouts.
+      </p>
+      <p>
+        <strong>2. Bulk loading requires dropping indexes.</strong> Always ingest raw data first, then build indexes concurrently.
+      </p>
+      <p>
+        <strong>3. Order of columns in composite indexes matters.</strong> Sorting on the wrong column can turn an index scan into an operation that is 5× slower than a sequential scan.
+      </p>
+      <p>
+        <strong>4. Never use OFFSET for deep pagination.</strong> Use keyset cursors (<code>WHERE id > $1</code>) for predictable $O(\log N)$ performance.
+      </p>
+      <p>
+        <strong>5. Lean schemas preserve cache locality.</strong> Keeping variable-length text out of the primary OLTP table keeps page density high and buffer cache hits near 100%.
+      </p>
+      <p>
+        <strong>6. The single-machine secret: zero network hop physics.</strong> A major reason these latency numbers look so fast—<strong>1.03 ms median, 0.06 ms buffer hits, and 2,692 QPS</strong>—is that <strong>everything ran co-located on the same physical laptop</strong>.
+      </p>
+      <p>
+        In cloud production (like AWS ECS talking across availability zones to RDS Aurora), you instantly inherit an irreducible <strong>0.5 ms to 2.5 ms network round-trip time</strong> across VPC virtual switches, packet routing, and NIC interrupts before the database even sees the bytes. Here, Go and PostgreSQL talk over local loopback sharing the same CPU memory bus and PCIe NVMe channel. Network transit latency drops to virtually zero (~0.03 ms). It's an honest engineering reality check: in distributed systems, teams often spend months micro-optimizing SQL to shave 0.2 ms, only to surrender 3 ms to cloud network hops. Single-box colocation shows the true raw ceiling of what PostgreSQL and modern hardware can do when network physics aren't in the way.
+      </p>
+
+      <!-- Footer navigation -->
+      <div class="mt-14 pt-8 border-t border-[#1f2128] flex items-center justify-between text-xs font-mono">
+        <a href="/" class="text-neutral-400 hover:text-white flex items-center gap-1.5 transition-colors">
+          <svg class="size-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+          <span>Back to Live Workbench</span>
+        </a>
+        <a href="https://t.me/chapidevtalks_group/32454" target="_blank" class="text-neutral-400 hover:text-white transition-colors">
+          Join the Challenge ↗
+        </a>
+      </div>
+
+    </article>
+  </main>
+
+  <footer class="border-t border-[#1f2128] py-8 text-center text-xs font-mono text-neutral-500">
+    <p>100M Row PostgreSQL Benchmark · Built with Go 1.26 & PostgreSQL 18.1</p>
+  </footer>
+
+</body>
+</html>
