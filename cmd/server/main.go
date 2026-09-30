@@ -36,7 +36,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	var tableExists bool
 	_ = pool.QueryRow(r.Context(), `
 		SELECT EXISTS (
-			SELECT 1 FROM information_schema.tables 
+			SELECT 1 FROM information_schema.tables
 			WHERE table_name = 'hn_items'
 		);
 	`).Scan(&tableExists)
@@ -359,6 +359,32 @@ func handleComments(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func percentile(sorted []float64, p float64) float64 {
+	n := len(sorted)
+	if n == 0 {
+		return 0.0
+	}
+	if n == 1 {
+		return sorted[0]
+	}
+	if p <= 0.0 {
+		return sorted[0]
+	}
+	if p >= 1.0 {
+		return sorted[n-1]
+	}
+
+	rank := p * float64(n-1)
+	lower := int(rank)
+	upper := lower + 1
+	if upper >= n {
+		return sorted[n-1]
+	}
+
+	weight := rank - float64(lower)
+	return sorted[lower]*(1.0-weight) + sorted[upper]*weight
+}
+
 func handleBenchmark(w http.ResponseWriter, r *http.Request) {
 	runs, err := strconv.Atoi(r.URL.Query().Get("runs"))
 	if err != nil || runs <= 0 || runs > 500 {
@@ -485,29 +511,25 @@ func handleBenchmark(w http.ResponseWriter, r *http.Request) {
 		qps = float64(runs) / totalBenchTime
 	}
 
-	p50 := sorted[int(float64(runs)*0.50)]
-	p90 := sorted[int(float64(runs)*0.90)]
-	p95 := sorted[int(float64(runs)*0.95)]
-	p99 := sorted[int(float64(runs)*0.99)]
-	p999Idx := int(float64(runs) * 0.999)
-	if p999Idx >= len(sorted) {
-		p999Idx = len(sorted) - 1
-	}
-	p999 := sorted[p999Idx]
+	p50 := percentile(sorted, 0.50)
+	p90 := percentile(sorted, 0.90)
+	p95 := percentile(sorted, 0.95)
+	p99 := percentile(sorted, 0.99)
+	p999 := percentile(sorted, 0.999)
 
 	jsonResponse(w, http.StatusOK, map[string]any{
-		"query_type":     queryType,
-		"runs":           runs,
-		"p50_ms":         p50,
-		"p90_ms":         p90,
-		"p95_ms":         p95,
-		"p99_ms":         p99,
-		"p999_ms":        p999,
-		"min_ms":         sorted[0],
-		"max_ms":         sorted[len(sorted)-1],
-		"avg_ms":         sum / float64(runs),
-		"throughput_qps": qps,
-		"samples":        durations,
+		"query_type":         queryType,
+		"runs":               runs,
+		"p50_ms":             p50,
+		"p90_ms":             p90,
+		"p95_ms":             p95,
+		"p99_ms":             p99,
+		"p999_ms":            p999,
+		"min_ms":             sorted[0],
+		"max_ms":             sorted[len(sorted)-1],
+		"avg_ms":             sum / float64(runs),
+		"throughput_qps":     qps,
+		"samples":            durations,
 		"baseline_unindexed": baselineMap,
 	})
 }
@@ -660,8 +682,8 @@ func handleDeleteItem(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	tag, err := pool.Exec(r.Context(), `
-		UPDATE hn_items 
-		SET deleted = TRUE, deleted_at = NOW() 
+		UPDATE hn_items
+		SET deleted = TRUE, deleted_at = NOW()
 		WHERE id = $1;
 	`, id)
 	elapsed := time.Since(start)
@@ -689,8 +711,8 @@ func handleRestoreItem(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	tag, err := pool.Exec(r.Context(), `
-		UPDATE hn_items 
-		SET deleted = FALSE, deleted_at = NULL 
+		UPDATE hn_items
+		SET deleted = FALSE, deleted_at = NULL
 		WHERE id = $1;
 	`, id)
 	elapsed := time.Since(start)
@@ -719,12 +741,12 @@ func handleJanitorPurge(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	tag, err := pool.Exec(r.Context(), `
 		WITH to_delete AS (
-			SELECT id FROM hn_items 
-			WHERE deleted = TRUE 
+			SELECT id FROM hn_items
+			WHERE deleted = TRUE
 			LIMIT $1
 			FOR UPDATE SKIP LOCKED
 		)
-		DELETE FROM hn_items 
+		DELETE FROM hn_items
 		WHERE id IN (SELECT id FROM to_delete);
 	`, limit)
 	elapsed := time.Since(start)
