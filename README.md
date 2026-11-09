@@ -116,3 +116,4 @@ go run ./cmd/server
 ```bash
 k6 run --vus 100 --duration 30s loadtest.js
 ```
+
